@@ -1,11 +1,9 @@
 import io
 import re
 import torch
+import argparse  # 추가
 from flask import Flask, request
 from PIL import Image
-
-import argparse
-import torch
 
 from llava.constants import (
     IMAGE_TOKEN_INDEX,
@@ -14,7 +12,7 @@ from llava.constants import (
     DEFAULT_IM_END_TOKEN,
     IMAGE_PLACEHOLDER,
 )
-from llava.conversation import conv_templates, SeparatorStyle
+from llava.conversation import conv_templates
 from llava.model.builder import load_pretrained_model
 from llava.utils import disable_torch_init
 from llava.mm_utils import (
@@ -23,11 +21,11 @@ from llava.mm_utils import (
     get_model_name_from_path,
 )
 
-# 모델과 관련 설정 (실제 경로 및 기본값으로 수정)
+# 모델과 관련 설정
 MODEL_PATH = "/workspace/hdd/llava-v1.5-13b"   # 모델 파일 경로
-MODEL_BASE = None                 # 모델 베이스 이름 (필요시)
+MODEL_BASE = None  # 모델 베이스 이름 (필요시)
 
-# 모델 초기화 (서버가 시작될 때 한 번만 로드)
+# 모델 초기화
 disable_torch_init()
 model_name = get_model_name_from_path(MODEL_PATH)
 tokenizer, model, image_processor, context_len = load_pretrained_model(MODEL_PATH, MODEL_BASE, model_name)
@@ -38,10 +36,7 @@ app = Flask(__name__)
 
 @app.route('/send_image_text', methods=['POST'])
 def send_image_text():
-    """
-    클라이언트로부터 'text' (프롬프트)와 'image' 파일을 받아 모델 추론을 수행한 후 결과 텍스트를 반환합니다.
-    """
-    # 클라이언트 요청에서 텍스트와 이미지 파일 읽기
+    """클라이언트로부터 'text'와 'image'를 받아 모델 추론을 수행한 후 결과 반환"""
     text = request.form.get('text', '')
     image_file = request.files.get('image', None)
     if image_file is None:
@@ -52,19 +47,9 @@ def send_image_text():
     except Exception as e:
         return f"Error processing image: {str(e)}", 400
 
-    # 이미지 토큰 생성 및 텍스트에 추가 (eval_model 코드 참고)
+    # 이미지 토큰 생성 및 텍스트 추가
     image_token_se = DEFAULT_IM_START_TOKEN + DEFAULT_IMAGE_TOKEN + DEFAULT_IM_END_TOKEN
-    qs = text
-    if IMAGE_PLACEHOLDER in qs:
-        if getattr(model.config, 'mm_use_im_start_end', False):
-            qs = re.sub(IMAGE_PLACEHOLDER, image_token_se, qs)
-        else:
-            qs = re.sub(IMAGE_PLACEHOLDER, DEFAULT_IMAGE_TOKEN, qs)
-    else:
-        if getattr(model.config, 'mm_use_im_start_end', False):
-            qs = image_token_se + "\n" + qs
-        else:
-            qs = DEFAULT_IMAGE_TOKEN + "\n" + qs
+    qs = re.sub(IMAGE_PLACEHOLDER, image_token_se, text) if IMAGE_PLACEHOLDER in text else image_token_se + "\n" + text
 
     # 모델 이름에 따른 대화 모드 결정
     if "llama-2" in model_name.lower():
@@ -80,27 +65,27 @@ def send_image_text():
     else:
         conv_mode = "llava_v0"
 
-    # 대화 템플릿 생성 (eval_model의 conv_templates 활용)
+    # 대화 템플릿 생성
     conv = conv_templates[conv_mode].copy()
     conv.append_message(conv.roles[0], qs)
     conv.append_message(conv.roles[1], None)
     prompt = conv.get_prompt()
 
-    # 이미지 전처리: 이미지 크기 기록 및 텐서 변환
+    # 이미지 전처리
     image_size = image.size
     image_tensor = process_images([image], image_processor, model.config).to(device, dtype=torch.float16)
 
-    # 토크나이저를 이용해 프롬프트를 토큰화
+    # 입력 데이터 토큰화
     input_ids = tokenizer_image_token(prompt, tokenizer, IMAGE_TOKEN_INDEX, return_tensors="pt")
     input_ids = input_ids.unsqueeze(0).to(device)
 
-    # 추론 수행
+    # 모델 추론 수행
     with torch.inference_mode():
         output_ids = model.generate(
             input_ids,
             images=image_tensor,
             image_sizes=[image_size],
-            do_sample=True if 0.7 > 0 else False,  # 예시로 temperature=0.7 사용
+            do_sample=True if 0.7 > 0 else False,
             temperature=0.7,
             top_p=0.9,
             num_beams=1,
@@ -112,5 +97,10 @@ def send_image_text():
     return outputs
 
 if __name__ == '__main__':
-    # 기본 포트 7000번에서 서버 실행 (클라이언트 코드와 맞춰야 함)
-    app.run(port=7000)
+    # argparse를 사용해 포트 지정 가능하도록 변경
+    parser = argparse.ArgumentParser(description="LLaVA Flask Server")
+    parser.add_argument('-p', '--port', type=int, default=7000, help="서버 포트 (기본값: 7000)")
+    args = parser.parse_args()
+
+    # 지정된 포트에서 Flask 실행
+    app.run(host="0.0.0.0", port=args.port)
